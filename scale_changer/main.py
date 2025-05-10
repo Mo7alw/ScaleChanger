@@ -4,12 +4,26 @@ import cv2
 import os
 import math
 
+# Set the environment variable to prioritize FFMPEG over Media Foundation
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
 ASPECTS = {
     "16:9 (HD/Widescreen)": (16, 9),
     "4:3 (Standard)": (4, 3),
     "21:9 (Cinema)": (21, 9),
     "1:1 (Square)": (1, 1),
     "9:16 (Vertical)": (9, 16)
+}
+
+PREDEFINED_RESOLUTIONS = {
+    "16:9 - 1920x1080 (Full HD)": (1920, 1080),
+    "16:9 - 1280x720 (HD)": (1280, 720),
+    "16:9 - 2560x1440 (QHD)": (2560, 1440),
+    "16:9 - 3840x2160 (4K UHD)": (3840, 2160),
+    "4:3 - 1024x768 (XGA)": (1024, 768),
+    "4:3 - 800x600 (SVGA)": (800, 600),
+    "1:1 - 1080x1080 (Square)": (1080, 1080),
+    "9:16 - 1080x1920 (Vertical)": (1080, 1920)
 }
 
 def gcd(a, b):
@@ -34,7 +48,7 @@ def get_new_resolution(width, height, new_aspect):
     new_height = int(width * new_h / new_w)
     return width, new_height
 
-def scale_video(input_path, output_path, new_aspect, use_gpu=False):
+def scale_video(input_path, output_path, new_resolution, use_gpu=False, progress_callback=None):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         return False, "Could not open input video."
@@ -42,12 +56,20 @@ def scale_video(input_path, output_path, new_aspect, use_gpu=False):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    new_width, new_height = get_new_resolution(width, height, new_aspect)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    # Dynamically select the codec based on the output file extension
+    if output_path.endswith(".mp4"):
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use 'mp4v' for .mp4 files
+    else:
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Use 'XVID' for other formats like .avi
+
+    new_width, new_height = new_resolution
 
     # Output video writer
     out = cv2.VideoWriter(output_path, fourcc, fps, (new_width, new_height))
 
+    frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -62,6 +84,11 @@ def scale_video(input_path, output_path, new_aspect, use_gpu=False):
             frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
         out.write(frame_resized)
 
+        # Update progress
+        frame_count += 1
+        if progress_callback:
+            progress_callback(frame_count, total_frames)
+
     cap.release()
     out.release()
     return True, "Scaling completed successfully."
@@ -73,7 +100,7 @@ class ScaleChangerApp:
         self.input_path = ""
         self.output_path = ""
         self.current_aspect = tk.StringVar()
-        self.new_aspect = tk.StringVar(value=list(ASPECTS.keys())[0])
+        self.selected_resolution = tk.StringVar(value=list(PREDEFINED_RESOLUTIONS.keys())[0])
 
         # Input file
         tk.Label(root, text="Input Video:").grid(row=0, column=0, sticky="e")
@@ -92,14 +119,18 @@ class ScaleChangerApp:
         self.current_aspect_label = tk.Label(root, textvariable=self.current_aspect, width=20, relief="sunken")
         self.current_aspect_label.grid(row=2, column=1, sticky="w")
 
-        # New aspect
-        tk.Label(root, text="New Aspect Ratio:").grid(row=3, column=0, sticky="e")
-        self.aspect_menu = ttk.Combobox(root, textvariable=self.new_aspect, values=list(ASPECTS.keys()), state="readonly")
-        self.aspect_menu.grid(row=3, column=1, sticky="w")
+        # Resolution dropdown
+        tk.Label(root, text="Select Resolution:").grid(row=3, column=0, sticky="e")
+        self.resolution_menu = ttk.Combobox(root, textvariable=self.selected_resolution, values=list(PREDEFINED_RESOLUTIONS.keys()), state="readonly")
+        self.resolution_menu.grid(row=3, column=1, sticky="w")
+
+        # Progress bar
+        self.progress = ttk.Progressbar(root, orient="horizontal", length=300, mode="determinate")
+        self.progress.grid(row=4, column=0, columnspan=3, pady=10)
 
         # Start button
         self.start_btn = tk.Button(root, text="Start Scaling", command=self.start_scaling)
-        self.start_btn.grid(row=4, column=1, pady=10)
+        self.start_btn.grid(row=5, column=1, pady=10)
 
     def browse_input(self):
         path = filedialog.askopenfilename(
@@ -135,16 +166,26 @@ class ScaleChangerApp:
         if not self.input_path or not self.output_path:
             messagebox.showerror("Error", "Please select both input and output files.")
             return
-        aspect_key = self.new_aspect.get()
-        if aspect_key not in ASPECTS:
-            messagebox.showerror("Error", "Please select a valid new aspect ratio.")
+
+        resolution_key = self.selected_resolution.get()
+        if resolution_key not in PREDEFINED_RESOLUTIONS:
+            messagebox.showerror("Error", "Please select a valid resolution.")
             return
+
+        new_width, new_height = PREDEFINED_RESOLUTIONS[resolution_key]
+
+        def update_progress(current, total):
+            progress = int((current / total) * 100)
+            self.progress["value"] = progress
+            self.root.update_idletasks()
+
         use_gpu = cv2.cuda.getCudaEnabledDeviceCount() > 0
-        success, msg = scale_video(self.input_path, self.output_path, ASPECTS[aspect_key], use_gpu)
+        success, msg = scale_video(self.input_path, self.output_path, (new_width, new_height), use_gpu, update_progress)
         if success:
             messagebox.showinfo("Success", msg)
         else:
             messagebox.showerror("Error", msg)
+        self.progress["value"] = 0  # Reset progress bar
 
 if __name__ == "__main__":
     root = tk.Tk()
